@@ -24,16 +24,30 @@ async def main():
 
     agent = create_react_agent(llm, tools)
 
-    prompt = "Сделай краткую выжимку из файла `audio38s.ogg`."
-    print(f"\n▶️  Отправка запроса агенту: '{prompt}'")
+    # # Создаем выжимку и сохраняем в Qdrant
+    # prompt = "Сделай краткую выжимку из файла `video5m.mp4` и сохрани её в Qdrant."
+    # print(f"\n▶️  Отправка запроса агенту: '{prompt}'")
 
-    response = await agent.ainvoke({"messages": [("user", prompt)]})
+    # response = await agent.ainvoke({"messages": [("user", prompt)]})
 
-    print("\n--- Ответ агента ---")
-    final_response = response["messages"][-1]
-    if hasattr(final_response, "content"):
-        print(final_response.content)
-    print("--------------------")
+    # print("\n--- Ответ агента ---")
+    # final_response = response["messages"][-1]
+    # if hasattr(final_response, "content"):
+    #     print(final_response.content)
+    # print("--------------------")
+    
+    # Демонстрируем поиск
+    print("\n🔍 Демонстрация поиска в Qdrant...")
+    search_prompt = "Найди информацию про платформу техниум чтобы схожесть была больше 0.1"
+    print(f"\n▶️  Поиск: '{search_prompt}'")
+    
+    search_response = await agent.ainvoke({"messages": [("user", search_prompt)]})
+    
+    print("\n--- Результаты поиска ---")
+    search_final = search_response["messages"][-1]
+    if hasattr(search_final, "content"):
+        print(search_final.content)
+    print("-------------------------")
 
 
 if __name__ == "__main__":

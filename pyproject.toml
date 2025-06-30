@@ -22,6 +22,7 @@ dependencies = [
     "openai>=1.88.0",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.9.1",
+    "qdrant-client>=1.12.0",
     "torch>=2.7.1",
     "transformers>=4.52.4",
 ]
