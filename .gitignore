@@ -10,6 +10,7 @@ wheels/
 tmp_audio.wav
 .DS_Store
 .idea
+uploads/
 
 # Virtual environments
 .venv

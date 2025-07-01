@@ -1,54 +1,48 @@
-import asyncio
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import uvicorn
 
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+from api import api_router
+from services.qdrant_service import QdrantService
 
-from core.config import config
 
-llm = ChatOpenAI(openai_api_key=config.OPENAI_API_KEY, model="gpt-4o-mini")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Управление жизненным циклом приложения."""
+    # Startup
+    print("🚀 Запуск AI Summary Service...")
+    try:
+        qdrant_service = QdrantService()
+        await qdrant_service._ensure_collection_exists()
+        print("✅ Подключение к Qdrant установлено")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к Qdrant: {e}")
+        raise
+    
+    yield
+    
+    # Shutdown
+    print("🛑 Завершение работы сервера...")
 
-client = MultiServerMCPClient(
-    {
-        "local_http_tools": {
-            "url": "http://localhost:9000/mcp/",
-            "transport": "streamable_http",
-        }
-    }
+
+# Создание FastAPI приложения
+app = FastAPI(
+    title="AI Summary Service",
+    description="Сервис для создания выжимок из аудио, видео и текста с сохранением в Qdrant",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-async def main():
-    print("⏳ Подключение к MCP серверу и получение инструментов...")
-    tools = await client.get_tools()
-    print("✅ Инструменты получены:", [tool.name for tool in tools])
-
-    agent = create_react_agent(llm, tools)
-
-    # # Создаем выжимку и сохраняем в Qdrant
-    # prompt = "Сделай краткую выжимку из файла `video5m.mp4` и сохрани её в Qdrant."
-    # print(f"\n▶️  Отправка запроса агенту: '{prompt}'")
-
-    # response = await agent.ainvoke({"messages": [("user", prompt)]})
-
-    # print("\n--- Ответ агента ---")
-    # final_response = response["messages"][-1]
-    # if hasattr(final_response, "content"):
-    #     print(final_response.content)
-    # print("--------------------")
-    
-    # Демонстрируем поиск
-    print("\n🔍 Демонстрация поиска в Qdrant...")
-    search_prompt = "Найди информацию про платформу техниум чтобы схожесть была больше 0.1"
-    print(f"\n▶️  Поиск: '{search_prompt}'")
-    
-    search_response = await agent.ainvoke({"messages": [("user", search_prompt)]})
-    
-    print("\n--- Результаты поиска ---")
-    search_final = search_response["messages"][-1]
-    if hasattr(search_final, "content"):
-        print(search_final.content)
-    print("-------------------------")
+# Подключаем API роуты
+app.include_router(api_router)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("🚀 Запуск AI Summary Service...")
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )

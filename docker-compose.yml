@@ -1,4 +1,22 @@
 services:
+  api:
+    build: .
+    container_name: api-service
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=qdrant
+    volumes:
+      - ./uploads:/app/uploads
+      - /tmp:/tmp
+    depends_on:
+      - qdrant
+      - llm
+      - embedder
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
@@ -8,6 +26,18 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
+
+  llm:
+    provider:
+      type: model
+      options:
+        model: ai/smollm2:latest
+
+  embedder:
+    provider:
+      type: model
+      options:
+        model: ai/mxbai-embed-large:latest
 
 volumes:
   qdrant_storage:

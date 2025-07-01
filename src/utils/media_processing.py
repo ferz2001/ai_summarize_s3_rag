@@ -2,12 +2,13 @@ import os
 import subprocess
 import time
 from pathlib import Path
+import tempfile
+import shutil
+import httpx
 
-import requests
-import re
 from faster_whisper import WhisperModel
 from core.config import config
-from qdrant_manager import QdrantManager
+from services.qdrant_service import QdrantService
 
 
 def extract_audio(video_path: str, audio_path: str) -> None:
@@ -30,39 +31,82 @@ def extract_audio(video_path: str, audio_path: str) -> None:
 
 
 def transcribe_audio(audio_path: str, language: str = "ru") -> str:
-    """Транскрибирует аудио в текст с помощью Whisper."""
-    asr = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
-    segments, _ = asr.transcribe(audio_path, language=language)
-    print(segments)
-    return " ".join([segment.text for segment in segments])
+    """
+    Транскрибирует аудиофайл с помощью Whisper.
+    Args:
+        audio_path: Путь к аудиофайлу.
+        language: Язык аудио.
+    Returns:
+        Текст транскрипции.
+    """
+    print(f"🗣️ Начинаю транскрипцию аудио: {audio_path}")
+    start_time = time.time()
+    
+    # Используем локальную модель Whisper
+    model = WhisperModel("small", device="cpu", compute_type="int8")
+    
+    segments, info = model.transcribe(
+        audio_path, 
+        language=language,
+        condition_on_previous_text=False,
+        word_timestamps=False
+    )
+    
+    transcript = " ".join([segment.text for segment in segments])
+    
+    print(f"✅ Транскрипция завершена за {time.time() - start_time:.1f}с")
+    print(f"📝 Получено {len(transcript)} символов текста")
+    
+    return transcript.strip()
 
 
-def summarize_text(text: str, model: str = "deepseek-r1:8b") -> str:
-    """Отправляет текст в локальную модель Ollama и возвращает пересказ."""
+async def summarize_text(text: str, model: str = None) -> str:
+    """Создает пересказ текста с помощью локальных моделей."""
     prompt = (
         "Сделай подробный, но максимально сжатый пересказ этого текста на русском языке. "
         "Сохрани все ключевые детали и контекст, избегай потери важных смыслов. "
         "Не добавляй размышлений, комментариев или формат <think>. "
-        "Выдай связный, логичный и компактный пересказ, который можно использовать вместо оригинала:"
-        f"{text}\n\n"
+        "Выдай связный, логичный и компактный пересказ, который можно использовать вместо оригинала:\n\n"
+        f"{text}"
     )
-    resp = requests.post(
-        "http://localhost:11434/api/chat",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-        },
-        timeout=600,
-    )
-    resp.raise_for_status()
-    response = resp.json()["message"]["content"]
-    cleaned_content = re.sub(r"<think>.*?</think>\n?", "", response, flags=re.DOTALL)
-    print(cleaned_content)
-    return cleaned_content
+    if config.USE_LOCAL_MODELS:
+        # Используем только локальные модели, без fallback
+        from services.local_models_service import LocalModelsService
+        local_models = LocalModelsService()
+        summary = await local_models.chat_completion([
+            {
+                "role": "system",
+                "content": "Ты помощник для создания выжимок. Создавай краткие, но полные пересказы на русском языке."
+            },
+            {
+                "role": "user", 
+                "content": prompt
+            }
+        ], model)
+        print(summary)
+        return summary
+    else:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 2000,
+                    "temperature": 0.7
+                }
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            print(content)
+            return content
 
 
-def summarize_audio(audio_path: str, language: str = "ru", save_to_qdrant: bool = True) -> str:
+async def summarize_audio(audio_path: str, language: str = "ru", save_to_qdrant: bool = True) -> str:
     """
     Транскрибирует аудиофайл и создает выжимку из текста.
     Args:
@@ -74,8 +118,8 @@ def summarize_audio(audio_path: str, language: str = "ru", save_to_qdrant: bool 
     """
     # Проверяем, есть ли уже выжимка для этого файла
     if save_to_qdrant:
-        qdrant_manager = QdrantManager()
-        existing = qdrant_manager.check_file_exists(audio_path)
+        qdrant_service = QdrantService()
+        existing = await qdrant_service.check_file_exists(audio_path)
         if existing:
             print(f"✅ Найдена существующая выжимка для файла {Path(audio_path).name}")
             print(f"📅 Создана: {existing['created_at']}")
@@ -86,8 +130,8 @@ def summarize_audio(audio_path: str, language: str = "ru", save_to_qdrant: bool 
     print("\n🔊 Распознанный текст (обрезано):")
     print(transcript)
 
-    print("\n📝 Запрашиваю выжимку у Ollama…")
-    summary = summarize_text(transcript, model=config.OLLAMA_MODEL)
+    print("\n📝 Создаю выжимку с помощью ИИ…")
+    summary = await summarize_text(transcript)
     
     # Сохраняем в Qdrant
     if save_to_qdrant:
@@ -95,16 +139,16 @@ def summarize_audio(audio_path: str, language: str = "ru", save_to_qdrant: bool 
             metadata = {
                 "language": language,
                 "transcript_length": len(transcript),
-                "ollama_model": config.OLLAMA_MODEL
+                "model": config.LOCAL_CHAT_MODEL if config.USE_LOCAL_MODELS else "gpt-4o-mini"
             }
-            qdrant_manager.save_summary(audio_path, summary, "audio", metadata)
+            await qdrant_service.save_summary(audio_path, summary, "audio", metadata)
         except Exception as e:
             print(f"⚠️  Не удалось сохранить в Qdrant: {e}")
     
     return summary
 
 
-def summarize_video(video_path: str, language: str = "ru", save_to_qdrant: bool = True) -> str:
+async def summarize_video(video_path: str, language: str = "ru", save_to_qdrant: bool = True) -> str:
     """
     Создает выжимку из видеофайла.
     Args:
@@ -120,8 +164,8 @@ def summarize_video(video_path: str, language: str = "ru", save_to_qdrant: bool 
 
     # Проверяем, есть ли уже выжимка для этого файла
     if save_to_qdrant:
-        qdrant_manager = QdrantManager()
-        existing = qdrant_manager.check_file_exists(video_path)
+        qdrant_service = QdrantService()
+        existing = await qdrant_service.check_file_exists(video_path)
         if existing:
             print(f"✅ Найдена существующая выжимка для файла {Path(video_path).name}")
             print(f"📅 Создана: {existing['created_at']}")
@@ -133,7 +177,7 @@ def summarize_video(video_path: str, language: str = "ru", save_to_qdrant: bool 
             extract_audio(video_path, str(tmp_audio_path))
 
             # Не сохраняем промежуточную аудио-выжимку в Qdrant, только финальную видео-выжимку
-            summary = summarize_audio(str(tmp_audio_path), language=language, save_to_qdrant=False)
+            summary = await summarize_audio(str(tmp_audio_path), language=language, save_to_qdrant=False)
 
             print("\n📌 Итоговый пересказ:")
             print(summary)
@@ -147,9 +191,9 @@ def summarize_video(video_path: str, language: str = "ru", save_to_qdrant: bool 
                     metadata = {
                         "language": language,
                         "processing_time": elapsed,
-                        "ollama_model": config.OLLAMA_MODEL
+                        "model": config.LOCAL_CHAT_MODEL if config.USE_LOCAL_MODELS else "gpt-4o-mini"
                     }
-                    qdrant_manager.save_summary(video_path, summary, "video", metadata)
+                    await qdrant_service.save_summary(video_path, summary, "video", metadata)
                 except Exception as e:
                     print(f"⚠️  Не удалось сохранить в Qdrant: {e}")
             
@@ -159,7 +203,7 @@ def summarize_video(video_path: str, language: str = "ru", save_to_qdrant: bool 
                 os.remove(tmp_audio_path)
 
 
-def search_summaries(query: str, limit: int = 5, min_score: float = 0.3) -> str:
+async def search_summaries(query: str, limit: int = 5, min_score: float = 0.3) -> str:
     """
     Ищет похожие выжимки в Qdrant по запросу.
     Args:
@@ -170,8 +214,8 @@ def search_summaries(query: str, limit: int = 5, min_score: float = 0.3) -> str:
         Форматированный список найденных выжимок.
     """
     try:
-        qdrant_manager = QdrantManager()
-        results = qdrant_manager.search_similar_summaries(query, limit=limit, min_score=min_score)
+        qdrant_service = QdrantService()
+        results = await qdrant_service.search_similar_summaries(query, limit=limit, min_score=min_score)
         
         if not results:
             return f"🤷 Похожие выжимки не найдены (мин. схожесть: {min_score:.1f})."
@@ -202,7 +246,7 @@ def search_summaries(query: str, limit: int = 5, min_score: float = 0.3) -> str:
         return f"❌ Ошибка при поиске: {e}"
 
 
-def summarize_text_and_save(text: str, file_path: str = "manual_input", model: str = None) -> str:
+async def summarize_text_and_save(text: str, file_path: str = "manual_input", model: str = None) -> str:
     """
     Создает выжимку из текста и сохраняет в Qdrant.
     Args:
@@ -212,20 +256,16 @@ def summarize_text_and_save(text: str, file_path: str = "manual_input", model: s
     Returns:
         Выжимка из текста.
     """
-    if model is None:
-        model = config.OLLAMA_MODEL
-    
-    summary = summarize_text(text, model)
-    
-    # Сохраняем в Qdrant
+    summary = await summarize_text(text, model)
+
     try:
-        qdrant_manager = QdrantManager()
+        qdrant_service = QdrantService()
         metadata = {
             "text_length": len(text),
-            "ollama_model": model,
+            "model": config.LOCAL_CHAT_MODEL if config.USE_LOCAL_MODELS else "gpt-4o-mini",
             "source": "manual_input"
         }
-        qdrant_manager.save_summary(file_path, summary, "text", metadata)
+        await qdrant_service.save_summary(file_path, summary, "text", metadata)
     except Exception as e:
         print(f"⚠️  Не удалось сохранить в Qdrant: {e}")
     

@@ -4,66 +4,106 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 import re
+import httpx
 
-from qdrant_client import QdrantClient
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
-import requests
 
 
-class QdrantManager:
-    """Менеджер для работы с Qdrant векторной базой данных."""
+class QdrantService:
+    """Сервис для работы с Qdrant векторной базой данных."""
     
-    def __init__(self, host: str = "localhost", port: int = 6333):
-        self.client = QdrantClient(host=host, port=port)
-        self.collection_name = "summaries"
-        self._ensure_collection_exists()
+    def __init__(self, host: str = None, port: int = None, collection_name: str = None):
+        from core.config import config
+        
+        self.client = AsyncQdrantClient(
+            host=host or config.QDRANT_HOST,
+            port=port or config.QDRANT_PORT
+        )
+        self.collection_name = collection_name or config.QDRANT_COLLECTION_NAME
     
-    def _ensure_collection_exists(self):
+    async def _ensure_collection_exists(self):
         """Создает коллекцию, если она не существует."""
+        from core.config import config
+        
         try:
-            collections = self.client.get_collections()
+            collections = await self.client.get_collections()
             collection_names = [col.name for col in collections.collections]
             
+            # Определяем размерность векторов в зависимости от используемой модели
+            vector_size = 1024 if config.USE_LOCAL_MODELS else 1536
+            
             if self.collection_name not in collection_names:
-                print(f"🔧 Создаю коллекцию '{self.collection_name}' в Qdrant...")
-                self.client.create_collection(
+                print(f"🔧 Создаю коллекцию '{self.collection_name}' в Qdrant (размерность: {vector_size})...")
+                await self.client.create_collection(
                     collection_name=self.collection_name,
-                    vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
                 )
                 print("✅ Коллекция создана успешно")
             else:
-                print(f"✅ Коллекция '{self.collection_name}' уже существует")
+                # Проверяем размерность существующей коллекции
+                collection_info = await self.client.get_collection(self.collection_name)
+                existing_size = collection_info.config.params.vectors.size
+                
+                if existing_size != vector_size:
+                    print(f"⚠️ Размерность коллекции не соответствует модели ({existing_size} != {vector_size})")
+                    print(f"🔄 Пересоздаю коллекцию '{self.collection_name}' с правильной размерностью...")
+                    
+                    # Удаляем старую коллекцию
+                    await self.client.delete_collection(self.collection_name)
+                    
+                    # Создаём новую с правильной размерностью
+                    await self.client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+                    )
+                    print("✅ Коллекция пересоздана с правильной размерностью")
+                else:
+                    print(f"✅ Коллекция '{self.collection_name}' уже существует (размерность: {vector_size})")
         except Exception as e:
             print(f"❌ Ошибка при работе с коллекцией: {e}")
             raise
     
-    def _get_text_embedding(self, text: str) -> List[float]:
-        """Получает эмбеддинг текста через OpenAI API."""
+    async def _get_text_embedding(self, text: str) -> List[float]:
+        """Получает эмбеддинг текста через локальные модели или OpenAI."""
         from core.config import config
         
-        response = requests.post(
-            "https://api.openai.com/v1/embeddings",
-            headers={
-                "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "input": text,
-                "model": "text-embedding-3-small"
-            }
-        )
-        response.raise_for_status()
-        return response.json()["data"][0]["embedding"]
+        if config.USE_LOCAL_MODELS:
+            # Используем только локальные модели, без fallback
+            from services.local_models_service import LocalModelsService
+            
+            local_models = LocalModelsService()
+            embeddings = await local_models.get_embeddings([text])
+            return embeddings[0]
+        else:
+            # Используем OpenAI если локальные модели отключены
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "input": text,
+                        "model": "text-embedding-3-small"
+                    }
+                )
+                response.raise_for_status()
+                return response.json()["data"][0]["embedding"]
     
     def _generate_file_hash(self, file_path: str) -> str:
         """Генерирует хеш файла для уникальной идентификации."""
         file_path_obj = Path(file_path)
-        if not file_path_obj.exists():
-            raise FileNotFoundError(f"Файл {file_path} не найден")
         
-        # Используем путь файла + размер + время модификации
-        stat = file_path_obj.stat()
-        hash_string = f"{file_path}_{stat.st_size}_{stat.st_mtime}"
+        # Если файл существует, используем его метаданные
+        if file_path_obj.exists():
+            stat = file_path_obj.stat()
+            hash_string = f"{file_path}_{stat.st_size}_{stat.st_mtime}"
+        else:
+            # Для виртуальных файлов (например, manual_input) используем просто путь
+            hash_string = f"{file_path}_virtual"
+        
         return hashlib.md5(hash_string.encode()).hexdigest()
     
     def _split_text_into_chunks(self, text: str, max_chunk_size: int = 200, overlap: int = 50) -> List[str]:
@@ -120,7 +160,7 @@ class QdrantManager:
         
         return chunks
     
-    def save_summary(
+    async def save_summary(
         self, 
         file_path: str, 
         summary: str, 
@@ -142,6 +182,9 @@ class QdrantManager:
             Список ID сохраненных записей
         """
         try:
+            # Убеждаемся что коллекция существует
+            await self._ensure_collection_exists()
+            
             # Создаем базовые метаданные
             file_hash = self._generate_file_hash(file_path)
             session_id = str(uuid.uuid4())  # Общий ID для всех чанков одного файла
@@ -171,7 +214,7 @@ class QdrantManager:
             for i, chunk in enumerate(chunks):
                 # Создаем эмбеддинг для каждого чанка
                 print(f"🔄 Создаю эмбеддинг для чанка {i+1}/{len(chunks)}...")
-                embedding = self._get_text_embedding(chunk)
+                embedding = await self._get_text_embedding(chunk)
                 
                 point_id = str(uuid.uuid4())
                 point_ids.append(point_id)
@@ -193,7 +236,7 @@ class QdrantManager:
                 points_to_save.append(point)
             
             # Сохраняем все чанки одним запросом
-            self.client.upsert(
+            await self.client.upsert(
                 collection_name=self.collection_name,
                 points=points_to_save
             )
@@ -209,23 +252,23 @@ class QdrantManager:
             print(f"❌ Ошибка при сохранении в Qdrant: {e}")
             raise
     
-    def search_similar_summaries(self, query: str, limit: int = 10, min_score: float = 0.3) -> List[Dict]:
+    async def search_similar_summaries(self, query: str, limit: int = 10, min_score: float = 0.3) -> List[Dict]:
         """
         Ищет похожие выжимки по запросу.
         
         Args:
             query: Поисковый запрос
-            limit: Максимальное количество результатов (увеличен для учета чанков)
+            limit: Максимальное количество результатов (отдельных чанков)
             min_score: Минимальный порог схожести (0.0-1.0). По умолчанию 0.3
             
         Returns:
-            Список найденных выжимок с метаданными, сгруппированных по файлам
+            Список найденных чанков с метаданными, отсортированных по релевантности
         """
         try:
-            query_embedding = self._get_text_embedding(query)
+            query_embedding = await self._get_text_embedding(query)
             
             # Ищем больше результатов, чтобы учесть чанки
-            results = self.client.search(
+            results = await self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
                 limit=limit * 3,  # Ищем в 3 раза больше, чтобы учесть чанки
@@ -273,36 +316,29 @@ class QdrantManager:
                 if result.score > file_groups[session_id]["best_score"]:
                     file_groups[session_id]["best_score"] = result.score
             
-            # Сортируем группы по лучшему скору и берем топ результатов
-            sorted_groups = sorted(file_groups.values(), key=lambda x: x["best_score"], reverse=True)
+            # Собираем все чанки из всех групп и сортируем по скору
+            all_chunks = []
+            for session_id, group in file_groups.items():
+                for chunk in group["chunks"]:
+                    chunk_result = {
+                        "id": chunk["chunk_id"],
+                        "score": chunk["score"],
+                        "file_name": group["file_name"],
+                        "file_type": group["file_type"],
+                        "file_path": group["file_path"],
+                        "created_at": group["created_at"],
+                        "summary_length": group["summary_length"],
+                        "summary": chunk["chunk_text"][:300] + "..." if len(chunk["chunk_text"]) > 300 else chunk["chunk_text"],
+                        "chunk_index": chunk["chunk_index"],
+                        "is_chunk": chunk["is_chunk"],
+                        "session_id": session_id,
+                        "total_chunks": group.get("total_chunks", 1)
+                    }
+                    all_chunks.append(chunk_result)
             
-            # Формируем финальные результаты
-            final_results = []
-            for group in sorted_groups[:limit]:
-                # Сортируем чанки по скору
-                group["chunks"].sort(key=lambda x: x["score"], reverse=True)
-                
-                # Создаем превью из лучших чанков или полного текста
-                if group["full_summary"]:
-                    summary_preview = group["full_summary"]
-                else:
-                    # Берем лучшие чанки для превью
-                    best_chunks = group["chunks"][:2]  # Максимум 2 лучших чанка
-                    summary_preview = " ... ".join([chunk["chunk_text"] for chunk in best_chunks])
-                
-                result_item = {
-                    "id": group["id"],
-                    "score": group["best_score"],
-                    "file_name": group["file_name"],
-                    "file_type": group["file_type"],
-                    "file_path": group["file_path"],
-                    "created_at": group["created_at"],
-                    "summary_length": group["summary_length"],
-                    "summary": summary_preview,
-                    "chunks_count": len(group["chunks"]),
-                    "is_chunked": any(chunk["is_chunk"] for chunk in group["chunks"])
-                }
-                final_results.append(result_item)
+            # Сортируем все чанки по скору и берем топ результатов
+            sorted_chunks = sorted(all_chunks, key=lambda x: x["score"], reverse=True)
+            final_results = sorted_chunks[:limit]
             
             return final_results
             
@@ -310,7 +346,7 @@ class QdrantManager:
             print(f"❌ Ошибка при поиске: {e}")
             raise
     
-    def check_file_exists(self, file_path: str) -> Optional[Dict]:
+    async def check_file_exists(self, file_path: str) -> Optional[Dict]:
         """
         Проверяет, есть ли уже выжимка для данного файла.
         
@@ -323,7 +359,7 @@ class QdrantManager:
         try:
             file_hash = self._generate_file_hash(file_path)
             
-            results = self.client.scroll(
+            results = await self.client.scroll(
                 collection_name=self.collection_name,
                 scroll_filter={
                     "must": [
