@@ -18,9 +18,6 @@ RUN pip install uv
 # Устанавливаем зависимости
 RUN uv sync --frozen
 
-# Копируем исходный код
-COPY src/ ./src/
-
 # Создаем директории для файлов
 RUN mkdir -p /app/uploads/audio /app/uploads/video /app/uploads/temp
 
@@ -31,5 +28,5 @@ EXPOSE 8000
 ENV PYTHONPATH=/app/src
 ENV TMP_AUDIO=/tmp/extracted_audio.wav
 
-# Команда запуска
-CMD ["uv", "run", "python", "src/main.py"] 
+# Команда запуска с hot reload
+CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] 

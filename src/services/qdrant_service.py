@@ -106,9 +106,9 @@ class QdrantService:
         
         return hashlib.md5(hash_string.encode()).hexdigest()
     
-    def _split_text_into_chunks(self, text: str, max_chunk_size: int = 200, overlap: int = 50) -> List[str]:
+    def _split_text_into_chunks(self, text: str, max_chunk_size: int = 400, overlap: int = 50) -> List[str]:
         """
-        Разбивает текст на чанки с перекрытием.
+        Разбивает текст на чанки с перекрытием по границам предложений.
         
         Args:
             text: Исходный текст
@@ -126,36 +126,66 @@ class QdrantService:
         current_chunk = ""
         
         for sentence in sentences:
-            # Если добавление предложения не превысит лимит
-            if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
-                if current_chunk:
-                    current_chunk += ". " + sentence
-                else:
-                    current_chunk = sentence
+            # Проверяем, поместится ли предложение в текущий чанк
+            test_chunk = current_chunk + (". " if current_chunk else "") + sentence
+            
+            if len(test_chunk) <= max_chunk_size:
+                current_chunk = test_chunk
             else:
-                # Сохраняем текущий чанк
+                # Если текущий чанк не пустой, сохраняем его
                 if current_chunk:
                     chunks.append(current_chunk)
                 
-                # Начинаем новый чанк
-                current_chunk = sentence
+                # Если одно предложение больше max_chunk_size, разбиваем его по словам
+                if len(sentence) > max_chunk_size:
+                    words = sentence.split()
+                    word_chunk = ""
+                    
+                    for word in words:
+                        test_word_chunk = word_chunk + (" " if word_chunk else "") + word
+                        if len(test_word_chunk) <= max_chunk_size:
+                            word_chunk = test_word_chunk
+                        else:
+                            if word_chunk:
+                                chunks.append(word_chunk)
+                            word_chunk = word
+                    
+                    current_chunk = word_chunk
+                else:
+                    current_chunk = sentence
         
         # Добавляем последний чанк
         if current_chunk:
             chunks.append(current_chunk)
         
-        # Добавляем перекрытие между чанками
+        # Добавляем перекрытие между чанками для лучшего контекста
         if len(chunks) > 1 and overlap > 0:
             overlapped_chunks = []
             for i, chunk in enumerate(chunks):
                 if i == 0:
                     overlapped_chunks.append(chunk)
                 else:
-                    # Берем последние overlap символов из предыдущего чанка
+                    # Берем последние слова из предыдущего чанка для перекрытия
                     prev_chunk = chunks[i-1]
-                    overlap_text = prev_chunk[-overlap:] if len(prev_chunk) > overlap else prev_chunk
-                    overlapped_chunk = overlap_text + "... " + chunk
-                    overlapped_chunks.append(overlapped_chunk)
+                    
+                    # Ищем последние полные слова для перекрытия
+                    words = prev_chunk.split()
+                    overlap_words = []
+                    overlap_length = 0
+                    
+                    for word in reversed(words):
+                        if overlap_length + len(word) + 1 <= overlap:
+                            overlap_words.insert(0, word)
+                            overlap_length += len(word) + 1
+                        else:
+                            break
+                    
+                    if overlap_words:
+                        overlap_text = " ".join(overlap_words)
+                        overlapped_chunk = overlap_text + "... " + chunk
+                        overlapped_chunks.append(overlapped_chunk)
+                    else:
+                        overlapped_chunks.append(chunk)
             return overlapped_chunks
         
         return chunks
@@ -267,78 +297,36 @@ class QdrantService:
         try:
             query_embedding = await self._get_text_embedding(query)
             
-            # Ищем больше результатов, чтобы учесть чанки
             results = await self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
-                limit=limit * 3,  # Ищем в 3 раза больше, чтобы учесть чанки
+                limit=limit,
                 with_payload=True
             )
             
-            # Фильтруем результаты по минимальному порогу схожести
-            filtered_results = [result for result in results if result.score >= min_score]
-            
-            if not filtered_results:
-                return []
-            
-            # Группируем результаты по session_id (файлам)
-            file_groups = {}
-            
-            for result in filtered_results:
+            # Фильтруем и форматируем результаты
+            final_results = []
+            for result in results:
+                if result.score < min_score:
+                    continue
+                    
                 payload = result.payload
-                session_id = payload.get('session_id', result.id)
+                chunk_text = payload.get('chunk_text', payload.get('full_summary', ''))
                 
-                if session_id not in file_groups:
-                    # Создаем новую группу для файла
-                    file_groups[session_id] = {
-                        "id": session_id,
-                        "file_name": payload.get('file_name', 'Неизвестно'),
-                        "file_type": payload.get('file_type', 'unknown'),
-                        "file_path": payload.get('file_path', ''),
-                        "created_at": payload.get('created_at', ''),
-                        "summary_length": payload.get('summary_length', 0),
-                        "best_score": result.score,
-                        "chunks": [],
-                        "full_summary": payload.get('full_summary')  # Для нечанковантекстовных 
-                    }
-                
-                # Добавляем чанк к группе
-                chunk_info = {
-                    "chunk_id": result.id,
+                chunk_result = {
+                    "id": result.id,
                     "score": result.score,
-                    "chunk_text": payload.get('chunk_text', ''),
+                    "file_name": payload.get('file_name', 'Неизвестно'),
+                    "file_type": payload.get('file_type', 'unknown'),
+                    "file_path": payload.get('file_path', ''),
+                    "created_at": payload.get('created_at', ''),
+                    "summary_length": payload.get('summary_length', 0),
+                    "summary": chunk_text,
                     "chunk_index": payload.get('chunk_index', 0),
-                    "is_chunk": payload.get('is_chunk', False)
+                    "is_chunk": payload.get('is_chunk', False),
+                    "session_id": payload.get('session_id', result.id)
                 }
-                file_groups[session_id]["chunks"].append(chunk_info)
-                
-                # Обновляем лучший скор
-                if result.score > file_groups[session_id]["best_score"]:
-                    file_groups[session_id]["best_score"] = result.score
-            
-            # Собираем все чанки из всех групп и сортируем по скору
-            all_chunks = []
-            for session_id, group in file_groups.items():
-                for chunk in group["chunks"]:
-                    chunk_result = {
-                        "id": chunk["chunk_id"],
-                        "score": chunk["score"],
-                        "file_name": group["file_name"],
-                        "file_type": group["file_type"],
-                        "file_path": group["file_path"],
-                        "created_at": group["created_at"],
-                        "summary_length": group["summary_length"],
-                        "summary": chunk["chunk_text"][:300] + "..." if len(chunk["chunk_text"]) > 300 else chunk["chunk_text"],
-                        "chunk_index": chunk["chunk_index"],
-                        "is_chunk": chunk["is_chunk"],
-                        "session_id": session_id,
-                        "total_chunks": group.get("total_chunks", 1)
-                    }
-                    all_chunks.append(chunk_result)
-            
-            # Сортируем все чанки по скору и берем топ результатов
-            sorted_chunks = sorted(all_chunks, key=lambda x: x["score"], reverse=True)
-            final_results = sorted_chunks[:limit]
+                final_results.append(chunk_result)
             
             return final_results
             
@@ -452,4 +440,6 @@ class QdrantService:
             else:
                 result += ". " + current_chunk
         
-        return result 
+        return result
+    
+ 

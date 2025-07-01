@@ -24,7 +24,8 @@ async def summarize_text_endpoint(request: TextSummaryRequest):
 async def summarize_audio_endpoint(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Аудиофайл для обработки"),
-    language: str = Query(default="ru", description="Язык аудио")
+    language: str = Query(default="ru", description="Язык аудио"),
+    speed_multiplier: float = Query(default=2.0, description="Множитель скорости обработки (2.0 = в 2 раза быстрее)", ge=0.5, le=4.0)
 ):
     """Создает выжимку из загруженного аудиофайла."""
     try:
@@ -41,7 +42,8 @@ async def summarize_audio_endpoint(
         return await summary_service.create_audio_summary(
             file_path=saved_path,
             file_name=file.filename,
-            language=language
+            language=language,
+            speed_multiplier=speed_multiplier
         )
         
     except HTTPException:
@@ -55,7 +57,8 @@ async def summarize_audio_endpoint(
 async def summarize_video_endpoint(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Видеофайл для обработки"),
-    language: str = Query(default="ru", description="Язык аудио в видео")
+    language: str = Query(default="ru", description="Язык аудио в видео"),
+    speed_multiplier: float = Query(default=2.0, description="Множитель скорости обработки (2.0 = в 2 раза быстрее)", ge=0.5, le=4.0)
 ):
     """Создает выжимку из загруженного видеофайла."""
     try:
@@ -72,7 +75,8 @@ async def summarize_video_endpoint(
         return await summary_service.create_video_summary(
             video_path=saved_path,
             file_name=file.filename,
-            language=language
+            language=language,
+            speed_multiplier=speed_multiplier
         )
         
     except HTTPException:

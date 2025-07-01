@@ -10,6 +10,7 @@ services:
       - QDRANT_HOST=qdrant
     volumes:
       - ./uploads:/app/uploads
+      - ./src:/app/src
       - /tmp:/tmp
     depends_on:
       - qdrant
