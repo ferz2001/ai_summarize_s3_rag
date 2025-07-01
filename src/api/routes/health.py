@@ -1,51 +1,42 @@
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+import httpx
 
-from schemas.health import HealthResponse
-from services.qdrant_service import QdrantService
-from services.local_models_service import LocalModelsService
+from schemas.common import HealthStatus
+from core.config import config
 
-router = APIRouter(prefix="/health", tags=["health"])
+router = APIRouter(tags=["health"])
 
 
-@router.get("/", response_model=HealthResponse, summary="Проверка здоровья сервиса")
+@router.get("/health", response_model=HealthStatus)
 async def health_check():
-    """Проверка состояния сервиса и подключений."""
+    """Проверка здоровья системы."""
+    
+    # Проверяем Qdrant
     try:
-        status = {
-            "status": "healthy",
-            "qdrant": "unknown",
-            "local_models": "unknown"
-        }
-        
-        # Проверяем Qdrant
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}/")
+            qdrant_status = "healthy" if response.status_code == 200 else "unhealthy"
+    except Exception:
+        qdrant_status = "unhealthy"
+    
+    # Проверяем локальные модели если используются
+    local_models_status = None
+    if config.USE_LOCAL_MODELS:
         try:
-            qdrant_service = QdrantService()
-            await qdrant_service.client.get_collections()
-            status["qdrant"] = "connected"
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{config.LOCAL_MODELS_URL}/health")
+                local_models_status = "healthy" if response.status_code == 200 else "unhealthy"
         except Exception:
-            status["qdrant"] = "disconnected"
-        
-        # Проверяем локальные модели
-        try:
-            local_models = LocalModelsService()
-            test_response = await local_models.chat_completion([
-                {"role": "user", "content": "Привет, это тест"}
-            ])
-            if test_response:
-                status["local_models"] = "connected"
-        except Exception:
-            status["local_models"] = "disconnected"
-        
-        return HealthResponse(**status)
-        
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "unhealthy", 
-                "qdrant": "unknown",
-                "local_models": "unknown",
-                "error": str(e)
-            }
-        ) 
+            local_models_status = "unhealthy"
+    
+    # Общий статус
+    overall_status = "healthy" if qdrant_status == "healthy" and (
+        not config.USE_LOCAL_MODELS or local_models_status == "healthy"
+    ) else "unhealthy"
+    
+    return HealthStatus(
+        status=overall_status,
+        qdrant_status=qdrant_status,
+        local_models_status=local_models_status,
+        message="Система работает через LangChain" if overall_status == "healthy" else "Есть проблемы"
+    ) 

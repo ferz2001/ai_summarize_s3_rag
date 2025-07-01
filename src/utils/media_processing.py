@@ -1,18 +1,23 @@
-import subprocess
+import asyncio
+import tempfile
 import time
-
 from faster_whisper import WhisperModel
 
 
-def extract_audio(video_path: str, audio_path: str, speed_multiplier: float = 1.0) -> None:
+async def extract_audio(video_path: str, speed_multiplier: float = 1.0) -> str:
     """
     Извлекает звуковую дорожку в 16kHz моно WAV с помощью ffmpeg.
     
     Args:
         video_path: Путь к видеофайлу
-        audio_path: Путь для сохранения аудио
         speed_multiplier: Множитель скорости (2.0 = 2x быстрее, 0.5 = 2x медленнее)
+        
+    Returns:
+        Путь к извлечённому аудио файлу
     """
+    # Создаём временный файл для аудио
+    temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    
     command = [
         "ffmpeg",
         "-i",
@@ -31,20 +36,38 @@ def extract_audio(video_path: str, audio_path: str, speed_multiplier: float = 1.
         print(f"⚡ Ускоряю аудио в {speed_multiplier}x раз для быстрой обработки")
         command.extend(["-filter:a", f"atempo={speed_multiplier}"])
     
-    command.extend([audio_path, "-y"])
-    subprocess.run(command, check=True)
+    command.extend([temp_audio, "-y"])
+    
+    # Выполняем асинхронно
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await process.communicate()
+    
+    if process.returncode != 0:
+        raise Exception("Ошибка извлечения аудио из видео")
+    
+    return temp_audio
 
 
-def speed_up_audio(input_path: str, output_path: str, speed_multiplier: float = 2.0) -> None:
+async def speed_up_audio(input_path: str, speed_multiplier: float = 2.0) -> str:
     """
     Ускоряет существующий аудиофайл.
     
     Args:
         input_path: Путь к исходному аудиофайлу
-        output_path: Путь для сохранения ускоренного аудио
         speed_multiplier: Множитель скорости (2.0 = 2x быстрее)
+        
+    Returns:
+        Путь к ускоренному аудио файлу
     """
     print(f"⚡ Ускоряю аудио в {speed_multiplier}x раз...")
+    
+    # Создаём временный файл для результата
+    temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    
     command = [
         "ffmpeg",
         "-i",
@@ -57,10 +80,22 @@ def speed_up_audio(input_path: str, output_path: str, speed_multiplier: float = 
         "16000",
         "-ac",
         "1",
-        output_path,
+        temp_output,
         "-y"
     ]
-    subprocess.run(command, check=True)
+    
+    # Выполняем асинхронно
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await process.communicate()
+    
+    if process.returncode != 0:
+        raise Exception("Ошибка ускорения аудио")
+    
+    return temp_output
 
 
 def transcribe_audio(audio_path: str, language: str = "ru") -> str:

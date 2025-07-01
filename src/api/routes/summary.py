@@ -1,103 +1,94 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from pathlib import Path
+import tempfile
 
-from schemas.summary import TextSummaryRequest, SummaryResponse, ListSummariesResponse
+from schemas.common import SummaryRequest, SummaryResponse
 from services.summary_service import summary_service
-from services.file_service import file_service
 
-router = APIRouter(prefix="/summarize", tags=["summaries"])
+router = APIRouter(prefix="/summarize", tags=["summarize"])
 
 
-@router.post("/text", response_model=SummaryResponse, summary="Создать выжимку из текста")
-async def summarize_text_endpoint(request: TextSummaryRequest):
-    """Создает выжимку из переданного текста."""
+@router.post("/text", response_model=SummaryResponse)
+async def summarize_text(request: SummaryRequest):
+    """Создаёт суммаризацию текста."""
+    if not request.text:
+        raise HTTPException(status_code=400, detail="Текст не предоставлен")
+    
     try:
-        return await summary_service.create_text_summary(
+        result = await summary_service.summarize_text(
             text=request.text,
-            file_path=request.file_path
+            file_path=request.file_path or "manual_input.txt"
         )
+        return SummaryResponse(**result)
+    
     except Exception as e:
-        print(f"❌ Ошибка при создании выжимки из текста: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка создания выжимки: {str(e)}")
+        print(f"❌ Ошибка суммаризации текста: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка суммаризации: {str(e)}")
 
 
-@router.post("/audio", response_model=SummaryResponse, summary="Создать выжимку из аудиофайла")
-async def summarize_audio_endpoint(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Аудиофайл для обработки"),
-    language: str = Query(default="ru", description="Язык аудио"),
-    speed_multiplier: float = Query(default=2.0, description="Множитель скорости обработки (2.0 = в 2 раза быстрее)", ge=0.5, le=4.0)
+@router.post("/audio", response_model=SummaryResponse)
+async def summarize_audio(
+    file: UploadFile = File(...),
+    speed_multiplier: float = Form(2.0)
 ):
-    """Создает выжимку из загруженного аудиофайла."""
+    """Создаёт суммаризацию аудио файла."""
+    if not file.content_type or not file.content_type.startswith("audio/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть аудио")
+    
     try:
-        # Проверяем тип файла
-        if not file.content_type or not file.content_type.startswith('audio/'):
-            raise HTTPException(status_code=400, detail="Загруженный файл не является аудиофайлом")
+        # Сохраняем во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_path = temp_file.name
         
-        # Сохраняем файл в постоянную папку
-        saved_path = await file_service.save_uploaded_file(file, file_type="audio")
+        try:
+            result = await summary_service.summarize_audio(
+                file_path=temp_path,
+                speed_multiplier=speed_multiplier
+            )
+            # Обновляем file_path на оригинальное имя файла
+            result["file_path"] = file.filename or "audio_file"
+            return SummaryResponse(**result)
         
-        # Планируем очистку только если это временные файлы
-        background_tasks.add_task(file_service.cleanup_temp_files)
-        
-        return await summary_service.create_audio_summary(
-            file_path=saved_path,
-            file_name=file.filename,
-            language=language,
-            speed_multiplier=speed_multiplier
-        )
-        
-    except HTTPException:
-        raise
+        finally:
+            # Очищаем временный файл
+            Path(temp_path).unlink(missing_ok=True)
+    
     except Exception as e:
-        print(f"❌ Ошибка при обработке аудио: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка обработки аудио: {str(e)}")
+        print(f"❌ Ошибка суммаризации аудио: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка суммаризации аудио: {str(e)}")
 
 
-@router.post("/video", response_model=SummaryResponse, summary="Создать выжимку из видеофайла")
-async def summarize_video_endpoint(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Видеофайл для обработки"),
-    language: str = Query(default="ru", description="Язык аудио в видео"),
-    speed_multiplier: float = Query(default=2.0, description="Множитель скорости обработки (2.0 = в 2 раза быстрее)", ge=0.5, le=4.0)
+@router.post("/video", response_model=SummaryResponse)
+async def summarize_video(
+    file: UploadFile = File(...),
+    speed_multiplier: float = Form(2.0)
 ):
-    """Создает выжимку из загруженного видеофайла."""
+    """Создаёт суммаризацию видео файла."""
+    if not file.content_type or not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть видео")
+    
     try:
-        # Проверяем тип файла
-        if not file.content_type or not file.content_type.startswith('video/'):
-            raise HTTPException(status_code=400, detail="Загруженный файл не является видеофайлом")
+        # Сохраняем во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_path = temp_file.name
         
-        # Сохраняем видеофайл в постоянную папку
-        saved_path = await file_service.save_uploaded_file(file, file_type="video")
+        try:
+            result = await summary_service.summarize_video(
+                file_path=temp_path,
+                speed_multiplier=speed_multiplier
+            )
+            # Обновляем file_path на оригинальное имя файла
+            result["file_path"] = file.filename or "video_file"
+            return SummaryResponse(**result)
         
-        # Планируем очистку только временных файлов
-        background_tasks.add_task(file_service.cleanup_temp_files)
-        
-        return await summary_service.create_video_summary(
-            video_path=saved_path,
-            file_name=file.filename,
-            language=language,
-            speed_multiplier=speed_multiplier
-        )
-        
-    except HTTPException:
-        raise
+        finally:
+            # Очищаем временный файл
+            Path(temp_path).unlink(missing_ok=True)
+    
     except Exception as e:
-        print(f"❌ Ошибка при обработке видео: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка обработки видео: {str(e)}")
-
-
-@router.get("/", response_model=ListSummariesResponse, summary="Список всех выжимок")
-async def list_summaries_endpoint():
-    """Возвращает список всех сохраненных выжимок."""
-    try:
-        summaries = await summary_service.get_all_summaries()
-        
-        return ListSummariesResponse(
-            summaries=summaries,
-            total_files=len(summaries),
-            total_records=len(summaries)  # Упрощенно, можно добавить подсчет записей
-        )
-        
-    except Exception as e:
-        print(f"❌ Ошибка при получении списка: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка получения списка: {str(e)}") 
+        print(f"❌ Ошибка суммаризации видео: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка суммаризации видео: {str(e)}") 
